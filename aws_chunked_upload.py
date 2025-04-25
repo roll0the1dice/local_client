@@ -78,8 +78,8 @@ class AWSV4ChunkedUploader:
         if timestamp is None:
             timestamp = datetime.datetime.utcnow()
         
-        amz_date = '20130524T000000Z' # timestamp.strftime('%Y%m%dT%H%M%SZ')
-        date_stamp = '20130524' # timestamp.strftime('%Y%m%d')
+        amz_date = timestamp.strftime('%Y%m%dT%H%M%SZ')
+        date_stamp = timestamp.strftime('%Y%m%d')
         
         algorithm = 'AWS4-HMAC-SHA256'
         credential_scope = f"{date_stamp}/{self.region}/{self.service}/aws4_request"
