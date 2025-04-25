@@ -4,6 +4,7 @@ import datetime
 import os
 from typing import Dict, Optional, Union
 from urllib.parse import quote
+import requests
 
 class AWSV4ChunkedUploader:
     def __init__(
@@ -183,19 +184,10 @@ class AWSV4ChunkedUploader:
             final_chunk_metadata  # Final empty chunk and its separator
         )
         
-        print("\nDetailed size calculation:")
-        print(f"File size: {file_size} bytes")
-        print(f"Total chunks: {total_chunks}")
-        print(f"Chunk sizes: {chunk_sizes}")
-        print(f"Chunk metadata sizes: {chunk_metadata_sizes}")
-        print(f"Total metadata size: {total_metadata_size} bytes")
-        print(f"Final chunk metadata size: {final_chunk_metadata} bytes")
-        print(f"Total content length: {total_content_length} bytes")
-        
         # Prepare initial headers
         timestamp = datetime.datetime.utcnow()
-        amz_date = '20130524T000000Z' # timestamp.strftime('%Y%m%dT%H%M%SZ')
-        date_stamp = '20130524' # timestamp.strftime('%Y%m%d')
+        amz_date = timestamp.strftime('%Y%m%dT%H%M%SZ')
+        date_stamp = timestamp.strftime('%Y%m%d')
         
         headers = {
             'Host': self.host,
@@ -255,6 +247,9 @@ class AWSV4ChunkedUploader:
                 # 2. chunk
                 # 3. \r\n
                 
+                self.make_request(method, canonical_uri, headers, chunk_metadata + chunk + b'\r\n')
+
+                
                 previous_signature = chunk_signature
                 chunk_number += 1
             
@@ -270,6 +265,14 @@ class AWSV4ChunkedUploader:
             print("\nFinal empty chunk:")
             print(f"Chunk Signature: {final_chunk_signature}")
             print(f"Chunk Metadata: {final_metadata}")
+
+    def make_request(self, method: str, url: str, headers: Dict[str, str], data: Optional[bytes] = None):
+        try:
+            response = requests.request(method, url, headers=headers, data=data)
+            response.raise_for_status()
+            return response
+        except requests.exceptions.RequestException as e:
+            raise(f"Request failed...")
 
 def main():
     # Example usage
