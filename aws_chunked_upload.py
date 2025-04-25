@@ -46,24 +46,58 @@ class AWSV4ChunkedUploader:
         payload_hash: str
     ) -> str:
         """Create canonical request for AWS Signature V4."""
-        canonical_headers = '\n'.join([
-            f"{k.lower()}:{v}"
-            for k, v in sorted(headers.items())
-        ]) + '\n'
+        # Convert all header keys to lowercase
+        lowercase_headers = {k.lower(): v for k, v in headers.items()}
         
+        # Define the exact order of headers as per AWS documentation
+        header_order = [
+            'content-encoding',
+            'host',
+            'x-amz-content-sha256',
+            'x-amz-date',
+            'x-amz-decoded-content-length',
+            'x-amz-storage-class',
+            'x-amz-trailer'
+        ]
+        
+        # Create canonical headers in exact order
+        canonical_headers = '\n'.join([
+            f"{k}:{lowercase_headers[k]}"
+            for k in header_order
+            if k in lowercase_headers
+        ]) + '\n\n'  # Add extra newline as per AWS documentation
+        
+        # Create signed headers in exact order
         signed_headers = ';'.join([
-            k.lower()
-            for k in sorted(headers.keys())
+            k
+            for k in header_order
+            if k in lowercase_headers
         ])
         
-        return '\n'.join([
+        # Use the same payload hash as in x-amz-content-sha256 header
+        final_payload_hash = lowercase_headers.get('x-amz-content-sha256', payload_hash)
+        
+        # Create canonical request with exact format
+        canonical_request = '\n'.join([
             method,
             canonical_uri,
             query_string,
             canonical_headers,
             signed_headers,
-            payload_hash
+            final_payload_hash
         ])
+        
+        print("Canonical Request:")
+        print(canonical_request)
+        print("---")
+        
+        # Calculate and print the hash of canonical request
+        hashed_canonical_request = hashlib.sha256(canonical_request.encode('utf-8')).hexdigest()
+        print("Hashed Canonical Request:")
+        print(hashed_canonical_request)
+        print("---")
+        
+        return canonical_request
     
     def get_authorization_header(
         self,
@@ -84,28 +118,52 @@ class AWSV4ChunkedUploader:
         algorithm = 'AWS4-HMAC-SHA256'
         credential_scope = f"{date_stamp}/{self.region}/{self.service}/aws4_request"
         
-        canonical_request = self.create_canonical_request(
+        # Convert all header keys to lowercase
+        lowercase_headers = {k.lower(): v for k, v in headers.items()}
+        
+        # Create canonical headers
+        canonical_headers = '\n'.join([
+            f"{k}:{v}"
+            for k, v in sorted(lowercase_headers.items())
+        ]) + '\n'
+        
+        # Create signed headers
+        signed_headers = ';'.join([
+            k
+            for k in sorted(lowercase_headers.keys())
+        ])
+        
+        # Create canonical request
+        canonical_request = '\n'.join([
             method,
             canonical_uri,
             query_string,
-            headers,
+            canonical_headers,
+            signed_headers,
             payload_hash
-        )
+        ])
+
+        print(canonical_request)
+
+        hashed_canonical_request = hashlib.sha256(canonical_request.encode('utf-8')).hexdigest()
         
+        # Create string to sign
         string_to_sign = '\n'.join([
             algorithm,
             amz_date,
             credential_scope,
-            hashlib.sha256(canonical_request.encode('utf-8')).hexdigest()
+            hashed_canonical_request
         ])
         
+        # Calculate signature
         signing_key = self.get_signature_key(date_stamp, self.region, self.service)
         signature = hmac.new(signing_key, string_to_sign.encode('utf-8'), hashlib.sha256).hexdigest()
         
+        # Create authorization header
         return (
             f"{algorithm} "
             f"Credential={self.access_key}/{credential_scope}, "
-            f"SignedHeaders={';'.join(sorted([k.lower() for k in headers.keys()]))},"
+            f"SignedHeaders={signed_headers}, "
             f"Signature={signature}"
         )
     
@@ -148,9 +206,39 @@ class AWSV4ChunkedUploader:
         print(f"Chunk size {chunk_size} (0x{size_hex}): metadata size = {metadata_size}")
         return metadata_size
     
+    def parse_aws_timestamp(self, aws_timestamp: str) -> datetime.datetime:
+        """Convert AWS timestamp format to datetime object.
+        
+        Args:
+            aws_timestamp: AWS timestamp in format 'YYYYMMDDTHHMMSSZ'
+        
+        Returns:
+            datetime object
+        """
+        # Parse the timestamp string
+        # Format: YYYYMMDDTHHMMSSZ
+        year = int(aws_timestamp[0:4])
+        month = int(aws_timestamp[4:6])
+        day = int(aws_timestamp[6:8])
+        hour = int(aws_timestamp[9:11])
+        minute = int(aws_timestamp[11:13])
+        second = int(aws_timestamp[13:15])
+        
+        # Create datetime object
+        return datetime.datetime(
+            year=year,
+            month=month,
+            day=day,
+            hour=hour,
+            minute=minute,
+            second=second,
+            tzinfo=datetime.timezone.utc
+        )
+
     def upload_file(self, file_path: str, bucket: str, key: str) -> None:
         """Upload a file using chunked upload with AWS Signature V4."""
         method = 'PUT'
+        url = f'https://{self.host}/{bucket}/{quote(key)}'
         canonical_uri = f'/{bucket}/{quote(key)}'
         query_string = ''
         
@@ -185,18 +273,19 @@ class AWSV4ChunkedUploader:
         )
         
         # Prepare initial headers
-        timestamp = datetime.datetime.utcnow()
-        amz_date = timestamp.strftime('%Y%m%dT%H%M%SZ')
-        date_stamp = timestamp.strftime('%Y%m%d')
+        timestamp = self.parse_aws_timestamp('20130524T000000Z')
+        amz_date = '20130524T000000Z'
+        date_stamp = '20130524'
         
         headers = {
             'Host': self.host,
             'x-amz-date': amz_date,
-            'x-amz-content-sha256': 'STREAMING-AWS4-HMAC-SHA256-PAYLOAD',
+            'x-amz-content-sha256': 'STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER',
             'Content-Encoding': 'aws-chunked',
-            'Content-Length': str(total_content_length),
+            #'Content-Length': str(total_content_length),
             'x-amz-storage-class': 'REDUCED_REDUNDANCY',
-            'x-amz-decoded-content-length': str(file_size)
+            'x-amz-decoded-content-length': str(file_size),
+            'x-amz-trailer': 'x-amz-checksum-crc32c'
         }
         
         # Get initial authorization header
@@ -205,7 +294,7 @@ class AWSV4ChunkedUploader:
             canonical_uri,
             query_string,
             headers,
-            'STREAMING-AWS4-HMAC-SHA256-PAYLOAD',
+            'STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER',
             timestamp
         )
         
@@ -242,13 +331,11 @@ class AWSV4ChunkedUploader:
                 print(f"Chunk Signature: {chunk_signature}")
                 print(f"Chunk Metadata: {chunk_metadata}")
                 
-                # In a real implementation, you would send:
-                # 1. chunk_metadata
-                # 2. chunk
-                # 3. \r\n
+                # Convert metadata to bytes and concatenate with chunk data
+                chunk_data = chunk_metadata.encode('utf-8') + chunk + b'\r\n'
                 
-                self.make_request(method, canonical_uri, headers, chunk_metadata + chunk + b'\r\n')
-
+                # Make request with the chunk
+                #self.make_request(method, url, headers, chunk_data)
                 
                 previous_signature = chunk_signature
                 chunk_number += 1
@@ -265,14 +352,36 @@ class AWSV4ChunkedUploader:
             print("\nFinal empty chunk:")
             print(f"Chunk Signature: {final_chunk_signature}")
             print(f"Chunk Metadata: {final_metadata}")
+            
+            # Convert final metadata to bytes and send
+            final_data = final_metadata.encode('utf-8') + b'\r\n'
+            #self.make_request(method, url, headers, final_data)
 
     def make_request(self, method: str, url: str, headers: Dict[str, str], data: Optional[bytes] = None):
+        """Make an HTTP request with retry logic."""
         try:
-            response = requests.request(method, url, headers=headers, data=data)
+            print(f"\nMaking {method} request to {url}")
+            print("Request headers:")
+            for k, v in headers.items():
+                print(f"{k}: {v}")
+            
+            response = requests.request(
+                method=method,
+                url=url,
+                headers=headers,
+                data=data,
+                stream=True
+            )
+            
+            
             response.raise_for_status()
-            return response
+            
+            print(response.text)
+
         except requests.exceptions.RequestException as e:
-            raise(f"Request failed...")
+            print(f"Request failed....")
+            print(f"Error: {str(e)}")
+    
 
 def main():
     # Example usage
