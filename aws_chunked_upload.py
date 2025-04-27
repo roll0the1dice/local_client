@@ -155,6 +155,10 @@ class AWSV4ChunkedUploader:
             hashed_canonical_request
         ])
         
+        print("-------------------DEBUG: String to Sign: -----------------")
+        print(string_to_sign)
+        print("----------------------------------------------------------")
+        
         # Calculate signature
         signing_key = self.get_signature_key(date_stamp, self.region, self.service)
         signature = hmac.new(signing_key, string_to_sign.encode('utf-8'), hashlib.sha256).hexdigest()
@@ -188,6 +192,10 @@ class AWSV4ChunkedUploader:
             hashed_empty_string,  # empty string hash
             hashed_payload
         ])
+        
+        print("-------------------DEBUG: chunk_string_to_sign: -----------------")
+        print(string_to_sign)
+        print("----------------------------------------------------------")
         
         signing_key = self.get_signature_key(
             date.split('T')[0],
@@ -238,7 +246,7 @@ class AWSV4ChunkedUploader:
     def upload_file(self, file_path: str, bucket: str, key: str) -> None:
         """Upload a file using chunked upload with AWS Signature V4."""
         method = 'PUT'
-        url = f'https://{self.host}/{bucket}/{quote(key)}'
+        url = f'http://{self.host}/{bucket}/{quote(key)}'
         canonical_uri = f'/{bucket}/{quote(key)}'
         query_string = ''
         
@@ -272,20 +280,26 @@ class AWSV4ChunkedUploader:
             final_chunk_metadata  # Final empty chunk and its separator
         )
         
+        #timestamp = self.parse_aws_timestamp('20250427T043824Z')
+        timestamp = datetime.datetime.utcnow()
+        
+        amz_date = timestamp.strftime('%Y%m%dT%H%M%SZ')
+        date_stamp = timestamp.strftime('%Y%m%d')
         # Prepare initial headers
-        timestamp = self.parse_aws_timestamp('20130524T000000Z')
-        amz_date = '20130524T000000Z'
-        date_stamp = '20130524'
+        # timestamp = self.parse_aws_timestamp('20250427T035114Z')
+        # amz_date = timestamp.strftime('%Y%m%dT%H%M%SZ')
+        # date_stamp = timestamp.strftime('%Y%m%d')
         
         headers = {
             'Host': self.host,
             'x-amz-date': amz_date,
-            'x-amz-content-sha256': 'STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER',
+            'x-amz-content-sha256': 'STREAMING-AWS4-HMAC-SHA256-PAYLOAD',
             'Content-Encoding': 'aws-chunked',
             #'Content-Length': str(total_content_length),
-            'x-amz-storage-class': 'REDUCED_REDUNDANCY',
-            'x-amz-decoded-content-length': str(file_size),
-            'x-amz-trailer': 'x-amz-checksum-crc32c'
+            #'x-amz-storage-class': 'REDUCED_REDUNDANCY',
+            #'x-amz-decoded-content-length': str(file_size),
+            #'x-amz-trailer': 'x-amz-checksum-crc32c'
+            #'Transfer-Encoding': 'chunked',
         }
         
         # Get initial authorization header
@@ -294,11 +308,35 @@ class AWSV4ChunkedUploader:
             canonical_uri,
             query_string,
             headers,
-            'STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER',
+            'STREAMING-AWS4-HMAC-SHA256-PAYLOAD',
             timestamp
         )
         
+        print("-------------------DEBUG: Authorization: -----------------")
+        print(authorization)
+        print("----------------------------------------------------------")
+        
+        
+        
+        # with open(file_path, 'rb') as f:
+        #        file_full_data = f.read()
+ 
+        # headers = {
+        #     'Host': self.host,
+        #     'x-amz-date': amz_date,
+        #     'x-amz-content-sha256': 'STREAMING-AWS4-HMAC-SHA256-PAYLOAD',
+        #     #'Content-Encoding': 'aws-chunked',
+        #     #'Content-Length': str(file_size),
+        #     #'x-amz-storage-class': 'REDUCED_REDUNDANCY',
+        #     'x-amz-decoded-content-length': str(0),
+        #     #'x-amz-trailer': 'x-amz-checksum-crc32c'
+        #     #'Transfer-Encoding': 'chunked',
+        # }
+        
         headers['Authorization'] = authorization
+ 
+        #self.make_request(method, url, headers, b'')
+        
         
         print(f"Initial Headers:")
         for k, v in headers.items():
@@ -308,12 +346,41 @@ class AWSV4ChunkedUploader:
         credential_scope = f"{date_stamp}/{self.region}/{self.service}/aws4_request"
         previous_signature = authorization.split('Signature=')[1]
         
+        print("Starting upload...")
+        try:
+            response = requests.put(
+                url=url,
+                headers=headers,
+                data=self.chunk_generator(file_path, amz_date, credential_scope, previous_signature)
+                # Let requests handle streaming via the generator
+            )
+            response.raise_for_status() # Raise an exception for bad status codes (4xx or 5xx)
+            print("Upload successful!")
+            print(f"Status Code: {response.status_code}")
+            print(f"ETag: {response.headers.get('ETag')}")
+            # print(f"Response Body: {response.text}") # Usually empty for successful PUT
+
+        except requests.exceptions.RequestException as e:
+            print(f"Upload failed: {e}")
+            if e.response is not None:
+                print(f"Status Code: {e.response.status_code}")
+                print(f"Response Body: {e.response.text}")
+
+        except Exception as e:
+            print(f"An unexpected error occurred: {e}")
+        
+        #previous_signature = 'eefd6e60547f354ae645a9585bb7c3963561a635a74507f9e1c2a1776756b575'
+    def chunk_generator(self, file_path: str, amz_date: str, credential_scope: str, previous_signature: str):
         with open(file_path, 'rb') as f:
             chunk_number = 0
             while True:
                 chunk = f.read(self.chunk_size)
                 if not chunk:
                     break
+                
+                if (chunk_number == 1):
+                    #previous_signature = '6b3abcf76abfcf1320b9bedebbf54a886f89effd5eef2b7559ab04af4a428094'
+                    pass
                 
                 # Calculate chunk signature
                 chunk_signature = self.calculate_chunk_signature(
@@ -334,8 +401,32 @@ class AWSV4ChunkedUploader:
                 # Convert metadata to bytes and concatenate with chunk data
                 chunk_data = chunk_metadata.encode('utf-8') + chunk + b'\r\n'
                 
-                # Make request with the chunk
-                #self.make_request(method, url, headers, chunk_data)
+                # headers = {
+                #     'Host': self.host,
+                #     'x-amz-date': amz_date,
+                #     'x-amz-content-sha256': 'STREAMING-AWS4-HMAC-SHA256-PAYLOAD',
+                #     'Content-Encoding': 'aws-chunked',
+                #     #'Content-Length': str(len(chunk_data)),
+                #     #'x-amz-storage-class': 'REDUCED_REDUNDANCY',
+                #     'x-amz-decoded-content-length': str(len(chunk)),
+                #     #'x-amz-trailer': 'x-amz-checksum-crc32c'
+                # }
+                
+                # authorization = self.get_authorization_header(
+                #     method,
+                #     canonical_uri,
+                #     query_string,
+                #     headers,
+                #     'STREAMING-AWS4-HMAC-SHA256-PAYLOAD',
+                #     timestamp
+                # )
+                
+                # headers['Authorization'] = authorization
+                
+                
+                yield chunk_data
+                # # Make request with the chunk
+                # self.make_request(method, url, headers, chunk_data)
                 
                 previous_signature = chunk_signature
                 chunk_number += 1
@@ -348,6 +439,33 @@ class AWSV4ChunkedUploader:
                 b''
             )
             
+
+            
+            headers = {
+                    'Host': self.host,
+                    'x-amz-date': amz_date,
+                    'x-amz-content-sha256': 'STREAMING-AWS4-HMAC-SHA256-PAYLOAD',
+                    'Content-Encoding': 'aws-chunked',
+                    #'Content-Length': str(len(chunk_data)),
+                    #'x-amz-storage-class': 'REDUCED_REDUNDANCY',
+                    'x-amz-decoded-content-length': str(0),
+                    #'x-amz-trailer': 'x-amz-checksum-crc32c'
+            }
+            
+            # authorization = self.get_authorization_header(
+            #         method,
+            #         canonical_uri,
+            #         query_string,
+            #         headers,
+            #         'STREAMING-AWS4-HMAC-SHA256-PAYLOAD',
+            #         timestamp
+            # )
+            
+            # headers['Authorization'] = authorization
+            
+            #yield final_data
+            
+            
             final_metadata = f"0;chunk-signature={final_chunk_signature}\r\n"
             print("\nFinal empty chunk:")
             print(f"Chunk Signature: {final_chunk_signature}")
@@ -355,6 +473,7 @@ class AWSV4ChunkedUploader:
             
             # Convert final metadata to bytes and send
             final_data = final_metadata.encode('utf-8') + b'\r\n'
+            yield final_data
             #self.make_request(method, url, headers, final_data)
 
     def make_request(self, method: str, url: str, headers: Dict[str, str], data: Optional[bytes] = None):
@@ -370,7 +489,8 @@ class AWSV4ChunkedUploader:
                 url=url,
                 headers=headers,
                 data=data,
-                stream=True
+                #stream=True,
+                #verify=False
             )
             
             
@@ -386,11 +506,11 @@ class AWSV4ChunkedUploader:
 def main():
     # Example usage
     uploader = AWSV4ChunkedUploader(
-        access_key='AKIAIOSFODNN7EXAMPLE',
-        secret_key='wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+        access_key='MAKI9JGZYIXE6ARQCKZ1',
+        secret_key='dYdcCs9y1CmKTcvwtZCWEERdK8i3S8hkGh83aYo7',
         region='us-east-1',
         service='s3',
-        host='s3.amazonaws.com'
+        host='172.20.123.123'
     )
     
     # Create a sample file
@@ -400,7 +520,7 @@ def main():
     try:
         uploader.upload_file(
             file_path='test_file.txt',
-            bucket='examplebucket',
+            bucket='mybucket',
             key='chunkObject.txt'
         )
     finally:

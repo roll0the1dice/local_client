@@ -188,3 +188,6 @@ if __name__ == "__main__":
         print(f"x-amz-date to send: {req_amz_date}")
         print(f"SignedHeaders to send: {signed_hdrs}") # 确认哪些头参与了签名
         print(f"Authorization header to send:\n{auth_header}")
+        
+    except Exception as e:
+        pass
